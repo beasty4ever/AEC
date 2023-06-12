@@ -4,112 +4,137 @@
 __declspec(dllexport) void aec_init();
 __declspec(dllexport) void aec_filter_frame(float*,float*,float*);
 
-#define AEC_MU    (0.01f/32767.0f)
-#define AEC_ORDER 1024
+#define AEC_MU    (int16)(0.05*32768)
+#define AEC_ORDER 256
 
-#define WINDS  32.0f   //  4 ms
-#define WINDM 128.0f   // 16 ms
-#define WINDL 16000.0f //  2  s
+#define ALFAS 5  // 4ms    - 32  отсчета
+#define ALFAM 7  // 16ms   - 128 отсчетов
+#define ALFAL 14 // 2048ms - 16384 отсчетов
 
-#define ALFAS (1.0f/WINDS)
-#define ALFAM (1.0f/WINDM)
-#define ALFAL (1.0f/WINDL)
+#define HANGOVER_TIME 1600 
 
-#define HANGOVER_TIME 1600 // 200 ms
+int32 aec_w[AEC_ORDER];  
+int32 aec_x[AEC_ORDER]; 
 
-float32 aec_w[AEC_ORDER];  
-float32 aec_x[AEC_ORDER]; 
+Uint32 TrTime;
 
-Uint32  TrTime;
+int16  RumpUp,RumpDn;
 
-float32 RumpUp,RumpDn;
+Uint32 FlgCng,FlgSnd,FlgMic;
+Uint32 CntCng,CntSnd,CntMic;
 
-Uint32  FlgSnd,FlgMic;
-Uint32  CntSnd,CntMic;
+int32 OutGain,CngGain;
 
-float32 OutGain,CngGain;
+int32 ErrPowS,ErrPowM;
+int32 ErrAccS,ErrAccM;
 
-float32 ErrPowS,ErrPowM;
-float32 SndPowS,SndPowM,SndPowL;
-float32 MicPowS,MicPowM,MicPowL;
+int32 SndPowS,SndPowM,SndPowL;
+int32 SndAccS,SndAccM,SndAccL;
+
+int32 MicAccS,MicAccM,MicAccL;
+int32 MicPowS,MicPowM,MicPowL;
 
 void aec_init() {
   Uint32  c0;  
 
-  TrTime = 16000;
+  TrTime = 16000;     // 2 sec
   
-  OutGain =  1.0f;
-  CngGain = 50.0f;
+  OutGain =    32767; // 1
+  CngGain = 50*32767; // 50
 
-  RumpUp  = 1/80.0f;
-  RumpDn  = 1/800.0f;
+  RumpUp  = 512;      // 1/64
+  RumpDn  = 64;       // 1/512 
 
+
+  FlgCng  = 0;
   FlgSnd  = 0;
   FlgMic  = 0;
+
+  CntCng  = HANGOVER_TIME;
   CntSnd  = HANGOVER_TIME;
   CntMic  = HANGOVER_TIME;
 
-  ErrPowS = 0.0f;
-  ErrPowM = 0.0f;
-  SndPowS = 0.0f;
-  SndPowM = 0.0f;
-  SndPowL = 0.0f;
-  MicPowS = 0.0f;
-  MicPowM = 0.0f;
-  MicPowL = 0.0f;
+  ErrPowS = 0;
+  ErrPowM = 0;
+  ErrAccS = 0;
+  ErrAccM = 0;
+
+  SndPowS = 0;
+  SndPowM = 0;
+  SndPowL = 0;
+  SndAccS = 0;
+  SndAccM = 0;
+  SndAccL = 0;
+  
+  MicAccS = 0;
+  MicAccM = 0;
+  MicAccL = 0;
+  MicPowS = 0;
+  MicPowM = 0;
+  MicPowL = 0;
 
   for(c0 = 0; c0 < AEC_ORDER; c0++) {
-    aec_x[c0] = 0.0f;
-	aec_w[c0] = 0.0f;
+    aec_x[c0] = 0;
+	aec_w[c0] = 0;
   }
 }
 
-static  int32  n = (int32)12357;   // Seed I(0) = 12357
-float32 uran(void) {
+static  int32 n = (int32)12357;  // Seed I(0) = 12357
+int16 uran(void) {
   int16 ran;                     // Random noise r(n)
     
   n = 2045*n;                    // I(n) = 2045 * I(n-1) + 1
   n = n&0xFFFFF000;              // I(n) = I(n) - INT[I(n)/1048576] * 1048576
   ran = (int16)(n>>20);          // r(n) = FLOAT[I(n) + 1] / 1048577
-  return ((float32)ran / 32767.0f); // Return r(n) to main function
-  
+  return ran;                    // Return r(n) to main function  
 }
 
-float32 aec_lms(float32 Mic,float32 Snd) {    
+float32 aec_lms(int16 Mic,int16 Snd) {    
   Uint32  c0;
-  
-  float32 aec_e;
-  float32 aec_c;
-  
-  float32 Out;
 
-  float32 TrhSnd,TrhMic;
-  float32 ClpSnd,ClpMic;
+  int32 aec_y = 0;
+  int16 aec_e = 0;
+  int32 aec_c = 0;
+   
+  int16 Out;
+  int32 Cng;
 
-  float32 AbsSnd = fabsf(Snd);
-  float32 AbsMic = fabsf(Mic);
+  int32 TrhSnd,TrhMic;
+  int32 ClpSnd,ClpMic;
+  
+  int16 AbsErr;
+  int16 AbsSnd = abs(Snd);
+  int16 AbsMic = abs(Mic);
 
   // Усредняем уровен с динамика 
-  SndPowS = (1.0f - ALFAS)*SndPowS  + ALFAS*AbsSnd;
-  SndPowM = (1.0f - ALFAM)*SndPowM  + ALFAM*AbsSnd;
-
+  SndAccS = SndAccS - SndPowS + AbsSnd;
+  SndAccM = SndAccM - SndPowM + AbsSnd;
+  
   if(SndPowL < SndPowS) {
-    SndPowL = (1.0f - ALFAL)*SndPowL  + ALFAL*AbsSnd;
+    SndAccL = SndAccL - SndPowL + AbsSnd;
   }                 
   else {
-    SndPowL = (1.0f - ALFAM)*SndPowL  + ALFAM*AbsSnd;
+    SndAccL = SndAccL - (SndAccL >> ALFAM) + AbsSnd;
   }  
 
-  // Усредняем уровен с динамика 
-  MicPowS = (1.0f - ALFAS)*MicPowS  + ALFAS*AbsMic;
-  MicPowM = (1.0f - ALFAM)*MicPowM  + ALFAM*AbsMic;
+  SndPowS = SndAccS >> ALFAS;
+  SndPowM = SndAccM >> ALFAM;
+  SndPowL = SndAccL >> ALFAL;
 
+  // Усредняем уровен с микрофона 
+  MicAccS = MicAccS - MicPowS + AbsMic;
+  MicAccM = MicAccM - MicPowM + AbsMic;
+  
   if(MicPowL < MicPowS) {
-    MicPowL = (1.0f - ALFAL)*MicPowL  + ALFAL*AbsMic;
+    MicAccL = MicAccL - MicPowL + AbsMic;
   }                 
   else {
-    MicPowL = (1.0f - ALFAM)*MicPowL  + ALFAM*AbsMic;
-  } 
+    MicAccL = MicAccL - (MicAccL >> ALFAM) + AbsMic;
+  }  
+
+  MicPowS = MicAccS >> ALFAS;
+  MicPowM = MicAccM >> ALFAM;
+  MicPowL = MicAccL >> ALFAL;
 
   // Фильтруем сигнал с динамика
   for(c0 = 0; c0 < (AEC_ORDER-1); c0++) {
@@ -117,21 +142,26 @@ float32 aec_lms(float32 Mic,float32 Snd) {
   }
   aec_x[AEC_ORDER - 1] = Snd;
   
-  aec_e = 0.0f;
+  aec_y = 0;
   for(c0 = 0; c0 < AEC_ORDER; c0++) {
-	aec_e = aec_e + aec_x[c0]*aec_w[c0];
+	aec_y = aec_y + ((int32)aec_x[c0])*aec_w[c0];
   }
-   
+  aec_e  = (int16)((aec_y + 0x4000)>>15);   
+  
   // Считеам ошибку
-  aec_e = Mic - aec_e;     
+  aec_e = Mic - aec_e;
 
-  // Усредняем ошибку 
-  ErrPowS = (1.0f - ALFAS)*ErrPowS  + ALFAS*fabsf(aec_e);
-  ErrPowM = (1.0f - ALFAM)*ErrPowM  + ALFAM*fabsf(aec_e);  
+  // Усредняем ошибку
+  AbsErr  = abs(aec_e);
+  ErrAccS = ErrAccS - ErrPowS + AbsErr;
+  ErrAccM = ErrAccM - ErrPowM + AbsErr;
+ 
+  ErrPowS = ErrAccS >> ALFAS;
+  ErrPowM = ErrAccM >> ALFAM;
 
   // Считаем пороги для обнаружения речи со входов
-  TrhSnd = (1.414f*SndPowL + 150.0f);  
-  TrhMic = (1.414f*MicPowL + 150.0f)*4.0f;
+  TrhSnd = (SndPowL + (SndPowL>>1) + 150);  
+  TrhMic = (MicPowL + (MicPowL>>1) + 150)<<2;
   
   // Детектор речи со входов
   if(SndPowS > TrhSnd) {
@@ -153,65 +183,80 @@ float32 aec_lms(float32 Mic,float32 Snd) {
   }
 
   // NLP процессор
-  ClpMic = MicPowM/(4.0f*1.414f);  
-  ClpSnd = SndPowM/(8.0f);         
- 
+  ClpMic = MicPowM/4;  
+  ClpSnd = SndPowM/4;         
+
   if (FlgSnd == 1) {
     if((FlgMic == 0) || (TrTime > 0)) {
 
       if (TrTime > 0) {
         TrTime = TrTime - 1;                            
-        if(OutGain > 0.25) OutGain = OutGain - RumpDn;                            
-        Out = OutGain*aec_e;                          
+        if(OutGain > 8192) OutGain = OutGain - RumpDn;                            
+        Out = (int16)((OutGain*aec_e) >> 15); 
       }
       
-      if((ErrPowM < ClpMic) || (ErrPowM < ClpSnd)) {                                        
-        if(CngGain > (1.414f*ErrPowM)) CngGain = ErrPowM;                       		
-        Out = OutGain*CngGain*(uran() - 0.5f);  
+      if((ErrPowM < ClpMic) || (ErrPowM < ClpSnd)) {    
+		FlgCng = 1;
+		CntCng = HANGOVER_TIME; 
+        if(CngGain > (ErrPowM + (ErrPowM>>1))) CngGain = ErrPowM; 
 	  }
 	  else {
-        if(OutGain > 0.25) OutGain = OutGain - RumpDn;                            
-        Out = OutGain*aec_e; 
+	    CntCng = (CntCng > 0)? (CntCng - 1) : 0; 
+        if(CntCng == 0) FlgCng = 0;
+	  }
+
+	  if(FlgCng == 1) {  
+		Cng = (CngGain*uran()) >> 15;
+        Out = (int16)((OutGain*Cng) >> 15);  
+	  }
+	  else {
+        if(OutGain > 8192) OutGain = OutGain - RumpDn;                            
+        Out = (int16)((OutGain*aec_e) >> 15);  
       }
       
-      if(SndPowM < 16000.0f) { 
-        aec_c = SndPowL/5.0f;               
-        if (aec_c > 8.0f) aec_c = 8.0f;
-        if (aec_c < 1.0f) aec_c = 1.0f;
+      if(SndPowM < 16000) { 
+        // LMS алгоритм обновления коэффициентов
+        aec_c = (SndPowL*32767)/5;   
 
-        aec_c = (aec_e*AEC_MU)/((SndPowM + 150.0f)*aec_c);  
-        
+        if(aec_c > 8*32767) aec_c = 8*32767;
+        if(aec_c < 1*32767) aec_c = 1*32767;
+  
+        aec_c = ((SndPowM + 150)*aec_c) >> 15;
+
+        aec_c = ((int32)aec_e * AEC_MU) / aec_c;  
+
         for(c0 = 0; c0 < AEC_ORDER; c0++) {
-          aec_w[c0] = (0.999969482f*aec_w[c0]) + (aec_c*aec_x[c0]);
+          aec_w[c0] = ((aec_w[c0] << 15) + (aec_c*aec_x[c0]) + 0x4000)>>15;
         }
       }
     }
     else {
-      if(OutGain > 0.5f) OutGain = OutGain - RumpDn;  
-      if(OutGain < 0.5f) OutGain = OutGain + RumpUp;
-      Out = OutGain*aec_e; 
+      if(OutGain > 16384) OutGain = OutGain - RumpDn;  
+      if(OutGain < 16384) OutGain = OutGain + RumpUp;
+      Out = (int16)((OutGain*Mic) >> 15);  
     }
   }
   else {
     if(FlgMic == 1) {
-      if(OutGain < 1.0f) OutGain = OutGain + RumpUp;
-      Out = OutGain*Mic;                               
+      if(OutGain < 32767) OutGain = OutGain + RumpUp;
+      Out = (int16)((OutGain*Mic) >> 15); 
     }
     else {
-      if(OutGain > 0.5f) OutGain = OutGain - RumpDn;  
-      if(OutGain < 0.5f) OutGain = OutGain + RumpUp;      
+      if(OutGain > 16384) OutGain = OutGain - RumpDn;  
+      if(OutGain < 16384) OutGain = OutGain + RumpUp;      
 	  
-	  Out = OutGain*Mic; 
+	  Out = (int16)((OutGain*Mic) >> 15); 
       CngGain = ErrPowM;
     }
   }
-  return Out;
+ 
+  return ((float32)(Out));
 }
 
 void aec_filter_frame(float *MicIn,float *SndIn,float *MicOut) {
   Uint32 c0;
   
   for(c0 = 0; c0 < 160; c0++) {
-	MicOut[c0] = aec_lms(MicIn[c0],SndIn[c0]);
+	MicOut[c0] = aec_lms((int16)MicIn[c0],(int16)SndIn[c0]);
   }
 }
