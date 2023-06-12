@@ -1,8 +1,18 @@
-#include <math.h>
+#include <string.h>
 #include "platform.h"
+
+//#define ARM_MATH_CM4
+
+#ifdef ARM_MATH_CM4
+#include "arm_math.h"
+#else
+int32 __SMLAD(int32 x,int32 y,int32 sum) {
+  return (sum + (((int16)(x>>16))*((int16)(y >> 16))) + (((int16) x) * ((int16) y)));
+}
 
 __declspec(dllexport) void aec_init();
 __declspec(dllexport) void aec_filter_frame(float*,float*,float*);
+#endif
 
 #define AEC_MU    (int16)(0.05*32768)
 #define AEC_ORDER 256
@@ -13,16 +23,17 @@ __declspec(dllexport) void aec_filter_frame(float*,float*,float*);
 
 #define HANGOVER_TIME 1600 
 
-int32 aec_w[AEC_ORDER];  
-int32 aec_x[AEC_ORDER]; 
+int16  aec_w[AEC_ORDER];  
+int16  aec_x[AEC_ORDER]; 
 
 Uint32 TrTime;
-
-int16  RumpUp,RumpDn;
 
 Uint32 FlgCng,FlgSnd,FlgMic;
 Uint32 CntCng,CntSnd,CntMic;
 
+int32 SeedCng;
+
+int32 RumpUp,RumpDn;
 int32 OutGain,CngGain;
 
 int32 ErrPowS,ErrPowM;
@@ -39,12 +50,13 @@ void aec_init() {
 
   TrTime = 16000;     // 2 sec
   
+  SeedCng = 12357;  
+
   OutGain =    32767; // 1
   CngGain = 50*32767; // 50
 
   RumpUp  = 512;      // 1/64
   RumpDn  = 64;       // 1/512 
-
 
   FlgCng  = 0;
   FlgSnd  = 0;
@@ -72,39 +84,40 @@ void aec_init() {
   MicPowS = 0;
   MicPowM = 0;
   MicPowL = 0;
-
+  
   for(c0 = 0; c0 < AEC_ORDER; c0++) {
     aec_x[c0] = 0;
 	aec_w[c0] = 0;
   }
 }
 
-static  int32 n = (int32)12357;  // Seed I(0) = 12357
-int16 uran(void) {
-  int16 ran;                     // Random noise r(n)
-    
-  n = 2045*n;                    // I(n) = 2045 * I(n-1) + 1
-  n = n&0xFFFFF000;              // I(n) = I(n) - INT[I(n)/1048576] * 1048576
-  ran = (int16)(n>>20);          // r(n) = FLOAT[I(n) + 1] / 1048577
-  return ran;                    // Return r(n) to main function  
+int16 uran() {
+  int16 ran;          
+  SeedCng = 2045*SeedCng;     
+  SeedCng = SeedCng&0xFFFFF000;
+  ran = (int16)(SeedCng>>20);          
+  return ran;                    
 }
 
-float32 aec_lms(int16 Mic,int16 Snd) {    
+int16 aec_lms(int16 Mic,int16 Snd) {    
   Uint32  c0;
-
-  int32 aec_y = 0;
+    
+  int32 *aec_px;
+  int32 *aec_pw;
+  
   int16 aec_e = 0;
+  int32 aec_y = 0;  
   int32 aec_c = 0;
    
   int16 Out;
-  int32 Cng;
+  int16 Cng;
 
   int32 TrhSnd,TrhMic;
   int32 ClpSnd,ClpMic;
   
   int16 AbsErr;
-  int16 AbsSnd = abs(Snd);
-  int16 AbsMic = abs(Mic);
+  int16 AbsSnd = (Snd > 0)? Snd : (-Snd);
+  int16 AbsMic = (Mic > 0)? Mic : (-Mic);
 
   // Усредняем уровен с динамика 
   SndAccS = SndAccS - SndPowS + AbsSnd;
@@ -136,23 +149,26 @@ float32 aec_lms(int16 Mic,int16 Snd) {
   MicPowM = MicAccM >> ALFAM;
   MicPowL = MicAccL >> ALFAL;
 
-  // Фильтруем сигнал с динамика
-  for(c0 = 0; c0 < (AEC_ORDER-1); c0++) {
-    aec_x[c0] = aec_x[c0+1];
-  }
-  aec_x[AEC_ORDER - 1] = Snd;
-  
-  aec_y = 0;
-  for(c0 = 0; c0 < AEC_ORDER; c0++) {
-	aec_y = aec_y + ((int32)aec_x[c0])*aec_w[c0];
-  }
-  aec_e  = (int16)((aec_y + 0x4000)>>15);   
-  
+  // Фильтруем сигнал с динамика  
+  memcpy(&aec_x[0],&aec_x[1],(AEC_ORDER-1)*sizeof(int16));
+  aec_x[AEC_ORDER - 1] = Snd;  
+
+  aec_y = 0;  
+  aec_px = (int32*)&aec_x[0];
+  aec_pw = (int32*)&aec_w[0];
+  for(c0 = 0; c0 < (AEC_ORDER/2); c0+=4) {        
+    aec_y = __SMLAD(aec_px[c0+0],aec_pw[c0+0],aec_y);    
+    aec_y = __SMLAD(aec_px[c0+1],aec_pw[c0+1],aec_y);   
+    aec_y = __SMLAD(aec_px[c0+2],aec_pw[c0+2],aec_y);   
+    aec_y = __SMLAD(aec_px[c0+3],aec_pw[c0+3],aec_y);   
+  }     
+  aec_e = (int16)((aec_y + 0x4000)>>15);   
+
   // Считеам ошибку
-  aec_e = Mic - aec_e;
+  aec_e = Mic - aec_e; 
 
   // Усредняем ошибку
-  AbsErr  = abs(aec_e);
+  AbsErr  = (aec_e > 0)? aec_e : (-aec_e);
   ErrAccS = ErrAccS - ErrPowS + AbsErr;
   ErrAccM = ErrAccM - ErrPowM + AbsErr;
  
@@ -183,8 +199,8 @@ float32 aec_lms(int16 Mic,int16 Snd) {
   }
 
   // NLP процессор
-  ClpMic = MicPowM/4;  
-  ClpSnd = SndPowM/4;         
+  ClpMic = MicPowM/4; // 12db 
+  ClpSnd = SndPowM/4; // 12db         
 
   if (FlgSnd == 1) {
     if((FlgMic == 0) || (TrTime > 0)) {
@@ -206,7 +222,7 @@ float32 aec_lms(int16 Mic,int16 Snd) {
 	  }
 
 	  if(FlgCng == 1) {  
-		Cng = (CngGain*uran()) >> 15;
+		Cng = (int16)((CngGain*uran()) >> 15);
         Out = (int16)((OutGain*Cng) >> 15);  
 	  }
 	  else {
@@ -225,8 +241,11 @@ float32 aec_lms(int16 Mic,int16 Snd) {
 
         aec_c = ((int32)aec_e * AEC_MU) / aec_c;  
 
-        for(c0 = 0; c0 < AEC_ORDER; c0++) {
-          aec_w[c0] = ((aec_w[c0] << 15) + (aec_c*aec_x[c0]) + 0x4000)>>15;
+        for(c0 = 0; c0 < (AEC_ORDER); c0+=4) {
+          aec_w[c0+0] = (int16)(((((int32)aec_w[c0+0]) << 15) + (aec_c*aec_x[c0+0]) + 0x4000)>>15);
+	      aec_w[c0+1] = (int16)(((((int32)aec_w[c0+1]) << 15) + (aec_c*aec_x[c0+1]) + 0x4000)>>15);
+	      aec_w[c0+2] = (int16)(((((int32)aec_w[c0+2]) << 15) + (aec_c*aec_x[c0+2]) + 0x4000)>>15);
+	      aec_w[c0+3] = (int16)(((((int32)aec_w[c0+3]) << 15) + (aec_c*aec_x[c0+3]) + 0x4000)>>15);
         }
       }
     }
@@ -250,13 +269,13 @@ float32 aec_lms(int16 Mic,int16 Snd) {
     }
   }
  
-  return ((float32)(Out));
+  return Out;
 }
 
 void aec_filter_frame(float *MicIn,float *SndIn,float *MicOut) {
   Uint32 c0;
   
   for(c0 = 0; c0 < 160; c0++) {
-	MicOut[c0] = aec_lms((int16)MicIn[c0],(int16)SndIn[c0]);
+	MicOut[c0] = (float32) aec_lms((int16)MicIn[c0],(int16)SndIn[c0]);
   }
 }
