@@ -1,0 +1,9 @@
+aeclib.ncb
+aeclib.sln
+aeclib.suo
+
+Debug/aeclib.exp
+Debug/aeclib.ilk
+Debug/aeclib.lib
+Debug/aeclib.pdb
+aeclib/
