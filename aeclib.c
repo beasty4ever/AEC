@@ -205,11 +205,7 @@ int16 aec_lms(int16 Mic,int16 Snd) {
   if (FlgSnd == 1) {
     if((FlgMic == 0) || (TrTime > 0)) {
 
-      if (TrTime > 0) {
-        TrTime = TrTime - 1;                            
-        if(OutGain > 8192) OutGain = OutGain - RumpDn;                            
-        Out = (int16)((OutGain*aec_e) >> 15); 
-      }
+      if (TrTime > 0) TrTime = TrTime - 1;                            
       
       if((ErrPowM < ClpMic) || (ErrPowM < ClpSnd)) {    
 		FlgCng = 1;
